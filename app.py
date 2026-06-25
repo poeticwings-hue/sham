@@ -422,6 +422,52 @@ def get_book_id_by_path(filepath):
     return row[0] if row else None
 
 
+def is_single_volume_book(book_id):
+    """Determine if a book is single-volume based on its location.
+    Standalone HTM in books/ = single-volume
+    HTM in subfolder = part of multi-part book"""
+    book_folder = get_book_folder(book_id)
+    if not book_folder:
+        return True  # Default to single-volume if we can't determine
+    
+    book_path = None
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT path FROM books WHERE id=?", (book_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if row:
+        book_path = Path(row[0])
+    
+    if not book_path:
+        return True
+    
+    # If book is directly in books/ folder (not in subfolder), it's single-volume
+    if book_path.parent.name == 'books' or str(book_path.parent) == str(BOOKS_DIR):
+        return True
+    
+    # If book is in a subfolder, it's part of a multi-part book
+    return False
+
+
+def is_single_volume_db(db_path):
+    """Check if .db file represents a single-volume book (all parts are NULL)."""
+    try:
+        conn = sqlite3.connect(str(db_path))
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT part FROM page WHERE part IS NOT NULL AND part != ''")
+        parts = [row[0] for row in c.fetchall()]
+        conn.close()
+        
+        # If no non-NULL/empty parts found, it's single-volume
+        if not parts:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def detect_local_part_name(book_id):
     """Detect which part this local file represents.
     Returns part name string (e.g., '1', '2', '001') or None."""
@@ -634,29 +680,39 @@ def inject_synthetic_anchor(html_content, heading_text, anchor_id):
 # ═══════════════════════════════════════════════════════════════
 
 def import_toc_for_book(book_id, shamela_id):
-    """Import TOC for a single part using local .db as page map.
+    """Import TOC for a single part or single-volume book using local .db as page map.
 
     Flow:
-    1. Detect which part this local file is (from filename or PartName span)
+    1. Determine if single-volume or multi-part book
     2. Find .db in parent folder
     3. Fetch Shamela TOC (whole book)
     4. Build mapping from absolute page numbers to (part, sequential_page) from .db
-    5. Filter TOC entries to only those belonging to THIS part
+    5. For single-volume: import ALL TOC entries
+       For multi-part: filter TOC entries to only those belonging to THIS part
     6. Map sequential page numbers to local slide page numbers
     7. Match each entry to local slides by printed page number
     8. Insert headings for this part only
     """
-    # ── Step 1: Detect local part name ──
-    local_part = detect_local_part_name(book_id)
-    if not local_part:
-        return {'status': 'error', 'message': 'تعذر تحديد رقم الجزء من اسم الملف'}
-    print(f"[INFO] Local file detected as part: '{local_part}'")
-
-    # ── Step 2: Find .db ──
+    # ── Step 1: Determine book type and local part ──
     book_folder = get_book_folder(book_id)
     if not book_folder:
         return {'status': 'error', 'message': 'تعذر تحديد مجلد الكتاب'}
 
+    # Check if this is a single-volume book (standalone in books/ folder)
+    is_single_volume = is_single_volume_book(book_id)
+    
+    if is_single_volume:
+        # For single-volume books, we don't need a part number
+        local_part = None
+        print(f"[INFO] Book {book_id} detected as single-volume")
+    else:
+        # For multi-part books, detect the part from filename or content
+        local_part = detect_local_part_name(book_id)
+        if not local_part:
+            return {'status': 'error', 'message': 'تعذر تحديد رقم الجزء من اسم الملف'}
+        print(f"[INFO] Local file detected as part: '{local_part}'")
+
+    # ── Step 2: Find .db ──
     db_path = find_shamela_db(book_folder)
     if not db_path:
         return {
@@ -686,7 +742,7 @@ def import_toc_for_book(book_id, shamela_id):
     # Build mapping: absolute_page_id -> (part, sequential_page)
     abs_page_map = {}
     for page_id, part, seq_page, number in page_rows:
-        abs_page_map[page_id] = (str(part), seq_page)
+        abs_page_map[page_id] = (str(part) if part else None, seq_page)
     
     # Build title info: title_id -> (page_id, parent_id)
     title_info = {}
@@ -706,9 +762,9 @@ def import_toc_for_book(book_id, shamela_id):
 
     print(f"[INFO] Shamela TOC has {len(toc_entries)} entries")
 
-    # ── Step 5: Filter to THIS part only ──
-    # Each TOC entry has an abs_page which is a page_id in the .db
-    # We need to check if that page belongs to our local_part
+    # ── Step 5: Filter TOC entries ──
+    # For single-volume: import ALL entries
+    # For multi-part: filter to THIS part only
     part_entries = []
     unmatched_pages = []
 
@@ -721,31 +777,49 @@ def import_toc_for_book(book_id, shamela_id):
 
         db_part, seq_page = abs_page_map[abs_page_id]
 
-        # Check if this entry belongs to our local part
-        # Normalize both to integers for comparison
-        is_match = False
-        if db_part == local_part:
-            is_match = True
-        elif db_part.isdigit() and local_part.isdigit():
-            if int(db_part) == int(local_part):
-                is_match = True
-
-        if is_match:
+        if is_single_volume:
+            # Single-volume: import ALL entries
             part_entries.append({
                 'level': entry['level'],
                 'text': entry['text'],
                 'abs_page_id': abs_page_id,
                 'seq_page': seq_page,
             })
+        else:
+            # Multi-part: filter to THIS part only
+            # Check if this entry belongs to our local part
+            is_match = False
+            if db_part == local_part:
+                is_match = True
+            elif db_part and db_part.isdigit() and local_part.isdigit():
+                if int(db_part) == int(local_part):
+                    is_match = True
 
-    print(f"[INFO] Filtered to {len(part_entries)} entries for part '{local_part}'")
+            if is_match:
+                part_entries.append({
+                    'level': entry['level'],
+                    'text': entry['text'],
+                    'abs_page_id': abs_page_id,
+                    'seq_page': seq_page,
+                })
+
+    if is_single_volume:
+        print(f"[INFO] Single-volume: importing all {len(part_entries)} TOC entries")
+    else:
+        print(f"[INFO] Filtered to {len(part_entries)} entries for part '{local_part}'")
 
     if not part_entries:
-        return {
-            'status': 'error',
-            'message': f'لا توجد عناوين للجزء {local_part} في الفهرس. '
-                      f'تأكد من رقم الجزء في اسم الملف أو محتوى الكتاب.'
-        }
+        if is_single_volume:
+            return {
+                'status': 'error',
+                'message': 'لا توجد عناوين في الفهرس. قد يكون ترقيم الصفحات مختلفاً.'
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': f'لا توجد عناوين للجزء {local_part} في الفهرس. '
+                          f'تأكد من رقم الجزء في اسم الملف أو محتوى الكتاب.'
+            }
 
     # ── Step 6: Get local slides with page numbers ──
     conn = sqlite3.connect(DB_PATH)

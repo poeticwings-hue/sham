@@ -16,7 +16,7 @@
             <button id="btn-refresh" title="تحديث المكتبة">تحديث المكتبة</button>
             <button id="btn-refresh-full" class="btn-secondary-small" title="إعادة فهرسة كاملة">⟲</button>
             <button id="btn-search-toggle" title="بحث">بحث</button>
-            <button id="btn-ai-toggle" title="الذكاء الاصطناعي">سؤال للعالِم</button>
+            <button id="btn-ai-toggle" title="الذكاء الاصطناعي">AI</button>
             <select id="font-selector" title="تغيير الخط">
                 <option value="Amiri">أميري</option>
                 <option value="Scheherazade New">شهرزاد</option>
@@ -69,6 +69,10 @@
         <aside id="sidebar">
             <div class="sidebar-header">
                 <h3>فهرس الكتب</h3>
+            </div>
+            <div class="toc-search-box">
+                <input type="text" id="toc-search-input" placeholder="بحث في الفهرس..." autocomplete="off">
+                <button id="toc-search-clear" class="toc-search-clear" title="مسح">×</button>
             </div>
             <div id="book-tree"></div>
         </aside>
