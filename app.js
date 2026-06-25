@@ -24,12 +24,29 @@ var aiMessages = document.getElementById('ai-messages');
 var aiInput = document.getElementById('ai-input');
 var fontSelector = document.getElementById('font-selector');
 
+// ── New DOM Elements for TOC Search ──
+var tocSearchInput = document.getElementById('toc-search-input');
+var tocSearchClear = document.getElementById('toc-search-clear');
+
+// ── Additional State ──
+var currentSlideNumber = null;  // Track current slide for session restoration
+var currentActiveHeadingId = null;  // Track active heading for highlighting
+
+// Arabic diacritics (tashkeel) range — matches the same characters the
+// server strips for search normalization, so toggling is predictable.
+var TASHKEEL_REGEX = /[\u064B-\u065F\u0670]/g;
+
+// ── Session State Keys ──
+var SESSION_STATE_KEY = 'libraryReaderState';
+
 // ── Init ──
 document.addEventListener('DOMContentLoaded', function() {
     loadBooks();
     setupEventListeners();
     setupFontSwitcher();
     setupTashkeelToggle();
+    setupTOCSearch();
+    restoreSessionState();
 });
 
 // ── Event Listeners ──
@@ -200,6 +217,9 @@ function renderBookTree() {
         var node = createTreeNode(book);
         bookTree.appendChild(node);
     });
+    
+    // Try to restore session state after books are loaded
+    setTimeout(applyPendingSessionState, 200);
 }
 
 function createTreeNode(book) {
@@ -221,10 +241,10 @@ function createTreeNode(book) {
     var dbIndicator = document.createElement('span');
     dbIndicator.className = 'db-indicator';
     if (book.has_db) {
-        dbIndicator.textContent = '🗃️';
+        dbIndicator.textContent = '📚';
         dbIndicator.title = 'قاعدة بيانات مرتبطة';
     } else {
-        dbIndicator.textContent = '⚠️';
+        dbIndicator.textContent = '❌';
         dbIndicator.title = 'لا توجد قاعدة بيانات';
         dbIndicator.style.opacity = '0.5';
     }
@@ -248,6 +268,8 @@ function createTreeNode(book) {
                 expanded = true;
                 children.classList.add('open');
                 arrow.classList.add('expanded');
+                // After loading structure, try to apply pending session state
+                setTimeout(applyPendingSessionState, 100);
             });
         } else {
             expanded = !expanded;
@@ -322,10 +344,12 @@ function renderStructureContainer(bookId, container, headings) {
     headings.forEach(function(h) {
         var div = document.createElement('div');
         div.className = 'tree-heading level-' + h.level;
+        div.dataset.headingId = h.id;  // Add heading ID for tracking
         div.textContent = h.text;
         div.addEventListener('click', function(e) {
             e.stopPropagation();
             navigateToHeading(bookId, h);
+            setActiveHeading(h.id);  // Track active heading
         });
         container.appendChild(div);
     });
@@ -336,12 +360,20 @@ function renderStructureContainer(bookId, container, headings) {
 // page they start on), so they fall back to scrolling to that whole page.
 function navigateToHeading(bookId, h) {
     var target = h.anchor ? { type: 'anchor', value: h.anchor } : { type: 'slide', value: h.slide_number };
+    
+    // Track current slide number for session restoration
+    if (target.type === 'slide') {
+        currentSlideNumber = target.value;
+    }
+    
     if (currentBookId === bookId) {
         if (target.type === 'anchor') scrollToAnchorWhenReady(target.value);
         else scrollToSlideWhenReady(target.value);
     } else {
         loadBookContent(bookId, target);
     }
+    
+    saveSessionState();
 }
 
 // Modified scroll functions to ensure they scroll to the top of the element
@@ -453,12 +485,29 @@ function runShamelaImport(bookId, container) {
 // jumpTarget (optional): { type: 'anchor', value: anchorId } or { type: 'slide', value: slideNumber }
 function loadBookContent(bookId, jumpTarget) {
     currentBookId = bookId;
+    
+    // Track slide number if jumpTarget is provided
+    if (jumpTarget && jumpTarget.type === 'slide') {
+        currentSlideNumber = jumpTarget.value;
+    }
+    
     welcome.classList.add('hidden');
     bookContent.classList.remove('hidden');
     bookContent.innerHTML = '<div class="loading-msg">جارٍ تحميل الكتاب...</div>';
+    
+    // Clear active heading when loading a new book
+    if (currentActiveHeadingId) {
+        var prevHeading = bookTree.querySelector('.tree-heading[data-heading-id="' + currentActiveHeadingId + '"]');
+        if (prevHeading) {
+            prevHeading.classList.remove('active-heading');
+        }
+        currentActiveHeadingId = null;
+    }
 
     renderToken++;
     var myToken = renderToken;
+    
+    saveSessionState();
 
     fetch('/api/books/' + bookId + '/content')
         .then(function(res) { return res.json(); })
@@ -466,6 +515,11 @@ function loadBookContent(bookId, jumpTarget) {
             if (myToken !== renderToken) return; // a newer load started meanwhile
             currentSlidesData = slides || [];
             renderAllSlides(myToken, jumpTarget);
+            
+            // Add scroll listener to save position
+            reader.addEventListener('scroll', debounce(function() {
+                saveSessionState();
+            }, 500));
         })
         .catch(function(err) {
             console.error('Error loading book:', err);
@@ -538,7 +592,7 @@ function handleSearch() {
         return res.json();
     })
     .then(function(results) {
-        renderSearchResults(results);
+        renderSearchResults(results, query);
     })
     .catch(function(err) {
         console.error('Search error:', err);
@@ -546,19 +600,22 @@ function handleSearch() {
     });
 }
 
-function renderSearchResults(results) {
+function renderSearchResults(results, query) {
     if (!results || results.length === 0) {
         searchResults.innerHTML = '<div class="empty-msg" style="padding:16px">لا توجد نتائج</div>';
         return;
     }
 
+    // Store the current search query for highlighting
+    var searchQuery = query || searchInput.value.trim();
+
     searchResults.innerHTML = '';
     results.forEach(function(r) {
         var item = document.createElement('div');
         item.className = 'search-result-item';
-        item.innerHTML = '<div class="result-title">' + escapeHtml(r.book_title) + '</div>' +
-            '<div class="result-meta">صفحة ' + r.slide_number + (r.heading ? ' — ' + escapeHtml(r.heading) : '') + '</div>' +
-            '<div class="result-snippet">' + escapeHtml(r.snippet) + '</div>';
+        item.innerHTML = '<div class="result-title">' + highlightSearchTerms(r.book_title, searchQuery) + '</div>' +
+            '<div class="result-meta">صفحة ' + r.slide_number + (r.heading ? ' — ' + highlightSearchTerms(r.heading, searchQuery) : '') + '</div>' +
+            '<div class="result-snippet">' + highlightSearchTerms(r.snippet, searchQuery) + '</div>';
         item.addEventListener('click', function() {
             toggleModal(searchModal, false);
             if (currentBookId === r.book_id) {
@@ -626,6 +683,215 @@ function addAIMessage(text, type, sources) {
     msg.innerHTML = html;
     aiMessages.appendChild(msg);
     aiMessages.scrollTop = aiMessages.scrollHeight;
+}
+
+// ── TOC Search ──
+function setupTOCSearch() {
+    if (!tocSearchInput || !tocSearchClear) return;
+
+    var tocSearchTimeout;
+
+    tocSearchInput.addEventListener('input', function() {
+        clearTimeout(tocSearchTimeout);
+        tocSearchTimeout = setTimeout(filterTOCBySearch, 300);
+        tocSearchClear.classList.toggle('hidden', tocSearchInput.value === '');
+    });
+
+    tocSearchClear.addEventListener('click', function() {
+        tocSearchInput.value = '';
+        filterTOCBySearch();
+        tocSearchClear.classList.add('hidden');
+        tocSearchInput.focus();
+    });
+
+    tocSearchInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            tocSearchInput.value = '';
+            filterTOCBySearch();
+            tocSearchClear.classList.add('hidden');
+        }
+    });
+}
+
+function filterTOCBySearch() {
+    var query = tocSearchInput.value.trim().toLowerCase();
+    if (!query) {
+        // Reset all visibility
+        var allNodes = bookTree.querySelectorAll('.tree-node, .tree-heading');
+        allNodes.forEach(function(node) {
+            node.style.display = '';
+        });
+        return;
+    }
+
+    var hasMatches = false;
+    var allNodes = bookTree.querySelectorAll('.tree-node, .tree-heading');
+    
+    allNodes.forEach(function(node) {
+        var text = node.textContent.toLowerCase();
+        if (text.includes(query)) {
+            node.style.display = '';
+            // Show parent nodes
+            var parentNode = node.closest('.tree-node');
+            if (parentNode) {
+                parentNode.style.display = '';
+                var children = parentNode.querySelector('.tree-children');
+                if (children) {
+                    children.classList.add('open');
+                    var toggle = parentNode.querySelector('.tree-arrow');
+                    if (toggle) toggle.classList.add('expanded');
+                }
+            }
+            hasMatches = true;
+        } else {
+            node.style.display = 'none';
+        }
+    });
+
+    if (!hasMatches) {
+        allNodes.forEach(function(node) {
+            node.style.display = '';
+        });
+    }
+}
+
+// ── Session Restoration ──
+function saveSessionState() {
+    if (!window.localStorage) return;
+    
+    var state = {
+        lastBookId: currentBookId,
+        lastSlideNumber: currentSlideNumber || null,
+        lastScrollPosition: reader.scrollTop || 0,
+        lastActiveHeadingId: currentActiveHeadingId || null,
+        tashkeelVisible: tashkeelVisible,
+        timestamp: Date.now()
+    };
+    
+    try {
+        localStorage.setItem(SESSION_STATE_KEY, JSON.stringify(state));
+    } catch (e) {
+        console.warn('Failed to save session state:', e);
+    }
+}
+
+function restoreSessionState() {
+    if (!window.localStorage) return;
+    
+    try {
+        var savedState = localStorage.getItem(SESSION_STATE_KEY);
+        if (!savedState) return;
+        
+        var state = JSON.parse(savedState);
+        
+        // Only restore if recent (within last 24 hours)
+        if (Date.now() - state.timestamp > 24 * 60 * 60 * 1000) return;
+        
+        // Restore tashkeel state
+        if (state.tashkeelVisible !== undefined) {
+            tashkeelVisible = state.tashkeelVisible;
+            var btn = document.getElementById('btn-tashkeel');
+            if (btn) {
+                btn.classList.toggle('active-toggle', !tashkeelVisible);
+                btn.textContent = tashkeelVisible ? '◌ التشكيل' : '◌ بدون تشكيل';
+            }
+        }
+        
+        // Store for later use (books need to load first)
+        window.pendingSessionState = state;
+        
+    } catch (e) {
+        console.warn('Failed to restore session state:', e);
+    }
+}
+
+function applyPendingSessionState() {
+    if (!window.pendingSessionState) return;
+    
+    var state = window.pendingSessionState;
+    delete window.pendingSessionState;
+    
+    // Find the book node
+    if (state.lastBookId) {
+        var bookNode = bookTree.querySelector('.tree-node[data-book-id="' + state.lastBookId + '"]');
+        if (bookNode) {
+            // Expand and activate the book
+            var toggle = bookNode.querySelector('.tree-toggle');
+            if (toggle) {
+                toggle.click();  // This will expand and load structure
+                
+                // After a brief delay, try to restore heading
+                setTimeout(function() {
+                    if (state.lastActiveHeadingId) {
+                        var headingNode = bookTree.querySelector('.tree-heading[data-heading-id="' + state.lastActiveHeadingId + '"]');
+                        if (headingNode) {
+                            headingNode.classList.add('active-heading');
+                            currentActiveHeadingId = state.lastActiveHeadingId;
+                        }
+                    }
+                    
+                    // Load book content if we have a slide number
+                    if (state.lastSlideNumber && currentBookId === state.lastBookId) {
+                        loadBookContent(state.lastBookId, { type: 'slide', value: state.lastSlideNumber });
+                        
+                        // Restore scroll position after content loads
+                        setTimeout(function() {
+                            if (state.lastScrollPosition) {
+                                reader.scrollTop = state.lastScrollPosition;
+                            }
+                        }, 500);
+                    } else if (state.lastBookId === currentBookId) {
+                        loadBookContent(state.lastBookId);
+                    }
+                }, 500);
+            }
+        }
+    }
+}
+
+// ── Search Term Highlighting ──
+function highlightSearchTerms(text, query) {
+    if (!query) return escapeHtml(text);
+    
+    var queryLower = query.toLowerCase();
+    var textLower = text.toLowerCase();
+    var result = '';
+    var lastIndex = 0;
+    var matchIndex;
+    
+    // Simple highlighting - find all occurrences
+    while ((matchIndex = textLower.indexOf(queryLower, lastIndex)) !== -1) {
+        result += escapeHtml(text.substring(lastIndex, matchIndex));
+        result += '<span class="search-highlight">' + escapeHtml(text.substring(matchIndex, matchIndex + query.length)) + '</span>';
+        lastIndex = matchIndex + query.length;
+    }
+    result += escapeHtml(text.substring(lastIndex));
+    
+    return result;
+}
+
+// ── Active Heading Tracking ──
+function setActiveHeading(headingId) {
+    // Remove previous active heading
+    if (currentActiveHeadingId) {
+        var prevHeading = bookTree.querySelector('.tree-heading[data-heading-id="' + currentActiveHeadingId + '"]');
+        if (prevHeading) {
+            prevHeading.classList.remove('active-heading');
+        }
+    }
+    
+    // Set new active heading
+    currentActiveHeadingId = headingId;
+    if (headingId) {
+        var headingNode = bookTree.querySelector('.tree-heading[data-heading-id="' + headingId + '"]');
+        if (headingNode) {
+            headingNode.classList.add('active-heading');
+            // Scroll heading into view in sidebar
+            headingNode.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+        }
+    }
+    
+    saveSessionState();
 }
 
 // ── Utilities ──
