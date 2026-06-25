@@ -86,15 +86,42 @@ function setupTashkeelToggle() {
 
         if (!currentSlidesData.length) return;
 
-        var scrollable = reader.scrollHeight - reader.clientHeight;
-        var scrollRatio = scrollable > 0 ? reader.scrollTop / scrollable : 0;
+        // Get the current scroll position and the element at the top of the viewport
+        var scrollTop = reader.scrollTop;
+        var viewportTop = scrollTop;
+        var viewportBottom = scrollTop + reader.clientHeight;
+        
+        // Find which slide is currently at the top of the viewport
+        var slides = bookContent.querySelectorAll('.slide-page');
+        var currentSlideIndex = 0;
+        for (var i = 0; i < slides.length; i++) {
+            var slideTop = slides[i].offsetTop;
+            var slideBottom = slideTop + slides[i].offsetHeight;
+            
+            // Check if this slide is at or just above the viewport top
+            if (slideBottom >= viewportTop && slideTop <= viewportTop) {
+                currentSlideIndex = i;
+                break;
+            }
+            // If we're past the viewport, use the previous slide
+            if (slideTop > viewportTop) {
+                currentSlideIndex = Math.max(0, i - 1);
+                break;
+            }
+        }
 
         renderToken++;
         renderAllSlides(renderToken, null);
 
+        // After rendering, scroll to the same slide position
         requestAnimationFrame(function() {
-            var newScrollable = reader.scrollHeight - reader.clientHeight;
-            reader.scrollTop = scrollRatio * newScrollable;
+            var newSlides = bookContent.querySelectorAll('.slide-page');
+            if (newSlides.length > currentSlideIndex) {
+                var targetSlide = newSlides[currentSlideIndex];
+                if (targetSlide) {
+                    targetSlide.scrollIntoView({ behavior: 'auto', block: 'start' });
+                }
+            }
         });
     });
 }
@@ -317,6 +344,31 @@ function navigateToHeading(bookId, h) {
     }
 }
 
+// Modified scroll functions to ensure they scroll to the top of the element
+function scrollToAnchorWhenReady(anchorId, attemptsLeft) {
+    attemptsLeft = attemptsLeft === undefined ? 40 : attemptsLeft;
+    var el = document.getElementById(anchorId);
+    if (el) {
+        // Scroll to the element with block: 'start' to ensure it's at the top
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+    }
+    if (attemptsLeft <= 0) return;
+    setTimeout(function() { scrollToAnchorWhenReady(anchorId, attemptsLeft - 1); }, 50);
+}
+
+function scrollToSlideWhenReady(slideNumber, attemptsLeft) {
+    attemptsLeft = attemptsLeft === undefined ? 40 : attemptsLeft;
+    var el = bookContent.querySelector('[data-slide-number="' + slideNumber + '"]');
+    if (el) {
+        // Scroll to the slide with block: 'start' to ensure it's at the top
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+    }
+    if (attemptsLeft <= 0) return;
+    setTimeout(function() { scrollToSlideWhenReady(slideNumber, attemptsLeft - 1); }, 50);
+}
+
 
 // ── Manual DB Upload ──
 function uploadDbFile(bookId, container) {
@@ -461,28 +513,6 @@ function appendRemainingChunks(slides, startIndex, token) {
     if (end < slides.length) {
         setTimeout(function() { appendRemainingChunks(slides, end, token); }, 0);
     }
-}
-
-function scrollToAnchorWhenReady(anchorId, attemptsLeft) {
-    attemptsLeft = attemptsLeft === undefined ? 40 : attemptsLeft;
-    var el = document.getElementById(anchorId);
-    if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        return;
-    }
-    if (attemptsLeft <= 0) return;
-    setTimeout(function() { scrollToAnchorWhenReady(anchorId, attemptsLeft - 1); }, 50);
-}
-
-function scrollToSlideWhenReady(slideNumber, attemptsLeft) {
-    attemptsLeft = attemptsLeft === undefined ? 40 : attemptsLeft;
-    var el = bookContent.querySelector('[data-slide-number="' + slideNumber + '"]');
-    if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        return;
-    }
-    if (attemptsLeft <= 0) return;
-    setTimeout(function() { scrollToSlideWhenReady(slideNumber, attemptsLeft - 1); }, 50);
 }
 
 // ── Search ──

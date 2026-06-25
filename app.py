@@ -362,15 +362,15 @@ def validate_shamela_db(db_path):
         conn = sqlite3.connect(str(db_path))
         c = conn.cursor()
         c.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = {row[0] for row in c.fetchall()}
+        tables = {row[0].lower() for row in c.fetchall()}
         if not {'page', 'title'}.issubset(tables):
             return False, "Missing tables (page, title)"
         c.execute("PRAGMA table_info(page)")
-        page_cols = {row[1] for row in c.fetchall()}
+        page_cols = {row[1].lower() for row in c.fetchall()}
         if not {'id', 'part', 'page'}.issubset(page_cols):
             return False, "Missing columns in page table"
         c.execute("PRAGMA table_info(title)")
-        title_cols = {row[1] for row in c.fetchall()}
+        title_cols = {row[1].lower() for row in c.fetchall()}
         if not {'id', 'page', 'parent'}.issubset(title_cols):
             return False, "Missing columns in title table"
         conn.close()
@@ -380,8 +380,21 @@ def validate_shamela_db(db_path):
 
 
 def find_shamela_db(folder_path):
+    """Find a valid Shamela .db file in the given folder.
+    Tries common names like 2864.db, metadata.db, or any .db file."""
     if not folder_path or not folder_path.exists():
         return None
+    
+    # Try specific patterns first
+    common_names = ['metadata.db', 'shamela.db', 'toc.db']
+    for name in common_names:
+        db_path = folder_path / name
+        if db_path.exists():
+            is_valid, _ = validate_shamela_db(db_path)
+            if is_valid:
+                return db_path
+    
+    # Try any .db file
     for db_path in folder_path.glob("*.db"):
         is_valid, _ = validate_shamela_db(db_path)
         if is_valid:
@@ -425,19 +438,21 @@ def detect_local_part_name(book_id):
     # Try filename pattern: 001.htm -> part "1" or "001"
     m = re.match(r'^(\d+)\.(?:htm|html)$', filename, re.I)
     if m:
-        return m.group(1)  # "001"
+        part_num = m.group(1)
+        # Normalize to string without leading zeros for matching
+        return part_num
 
     # Try PartName span in first slide
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT html_content FROM slides WHERE book_id=? ORDER BY slide_number LIMIT 3", (book_id,))
     for (html,) in c.fetchall():
-        # Look for جـ N or الجزء N
-        pm = re.search(r'[\-–]\s*ج[ـ]?\s*(\d+)', html)
+        # Look for جـ N or الجزء N or ج 1 or جزء 1
+        pm = re.search(r'ج[ـ]?\s*(\d+)', html)
         if pm:
             conn.close()
             return pm.group(1)
-        pm = re.search(r'الجزء\s*(?:ال)?(\d+)', html)
+        pm = re.search(r'الجزء\s*(?:ال)?\s*(\d+)', html)
         if pm:
             conn.close()
             return pm.group(1)
@@ -540,30 +555,70 @@ def inject_synthetic_anchor(html_content, heading_text, anchor_id):
             return html_content
 
         injected = False
+        
+        # First, try to find exact or partial match in text nodes
         for text_node in wrapper.find_all(string=True):
             if text_node.parent.name in ('script', 'style'):
                 continue
-            if norm_heading in normalize_arabic(str(text_node)):
+            node_text = str(text_node).strip()
+            if not node_text:
+                continue
+            norm_node = normalize_arabic(node_text)
+            # Check if heading is contained in this node (exact or as substring)
+            if norm_heading in norm_node or norm_node in norm_heading:
                 span = soup.new_tag('span', id=anchor_id, style='display:none')
                 text_node.parent.insert_before(span)
                 injected = True
                 break
 
         if not injected:
-            for elem in wrapper.find_all(['p', 'span', 'div', 'font']):
+            # Try in element text content
+            for elem in wrapper.find_all(['p', 'span', 'div', 'font', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
                 if elem.name in ('script', 'style'):
                     continue
-                if norm_heading in normalize_arabic(elem.get_text()):
+                elem_text = elem.get_text(strip=True)
+                if not elem_text:
+                    continue
+                norm_elem = normalize_arabic(elem_text)
+                if norm_heading in norm_elem or norm_elem in norm_heading:
                     span = soup.new_tag('span', id=anchor_id, style='display:none')
                     elem.insert_before(span)
                     injected = True
                     break
 
         if not injected:
-            page_head = wrapper.find('div', class_='PageHead')
-            if page_head:
-                span = soup.new_tag('span', id=anchor_id, style='display:none')
-                page_head.insert_after(span)
+            # Try partial matching with word boundaries
+            heading_words = norm_heading.split()
+            if len(heading_words) > 0:
+                for text_node in wrapper.find_all(string=True):
+                    if text_node.parent.name in ('script', 'style'):
+                        continue
+                    node_text = str(text_node).strip()
+                    if not node_text:
+                        continue
+                    norm_node = normalize_arabic(node_text)
+                    node_words = norm_node.split()
+                    # Check if first few words match
+                    for i in range(min(3, len(heading_words))):
+                        if heading_words[i] in node_words:
+                            span = soup.new_tag('span', id=anchor_id, style='display:none')
+                            text_node.parent.insert_before(span)
+                            injected = True
+                            break
+                    if injected:
+                        break
+
+        if not injected:
+            # Fallback: insert at the beginning of PageText or after PageHead
+            page_text = wrapper.find('div', class_='PageText')
+            if page_text:
+                page_head = page_text.find('div', class_='PageHead')
+                if page_head:
+                    span = soup.new_tag('span', id=anchor_id, style='display:none')
+                    page_head.insert_after(span)
+                else:
+                    span = soup.new_tag('span', id=anchor_id, style='display:none')
+                    page_text.insert(0, span)
             else:
                 span = soup.new_tag('span', id=anchor_id, style='display:none')
                 wrapper.insert(0, span)
@@ -585,9 +640,11 @@ def import_toc_for_book(book_id, shamela_id):
     1. Detect which part this local file is (from filename or PartName span)
     2. Find .db in parent folder
     3. Fetch Shamela TOC (whole book)
-    4. Filter to only entries belonging to THIS part via .db lookup
-    5. Match each entry to local slides by printed page number
-    6. Insert headings for this part only
+    4. Build mapping from absolute page numbers to (part, sequential_page) from .db
+    5. Filter TOC entries to only those belonging to THIS part
+    6. Map sequential page numbers to local slide page numbers
+    7. Match each entry to local slides by printed page number
+    8. Insert headings for this part only
     """
     # ── Step 1: Detect local part name ──
     local_part = detect_local_part_name(book_id)
@@ -612,18 +669,31 @@ def import_toc_for_book(book_id, shamela_id):
     if not is_valid:
         return {'status': 'error', 'message': f'قاعدة البيانات غير صالحة: {error}'}
 
-    # ── Step 3: Build abs_page → (part, seq_page) from .db ──
+    # ── Step 3: Build comprehensive mapping from .db ──
     s_conn = sqlite3.connect(str(db_path))
     s_c = s_conn.cursor()
-    s_c.execute("SELECT t.page, p.part, p.page FROM title t JOIN page p ON t.id = p.id")
-    rows = s_c.fetchall()
+    
+    # Get all page entries: id, part, page (sequential), number
+    s_c.execute("SELECT id, part, page, number FROM page WHERE page IS NOT NULL ORDER BY id")
+    page_rows = s_c.fetchall()
+    
+    # Get all title entries: id, page (ref to page.id), parent
+    s_c.execute("SELECT id, page, parent FROM title ORDER BY id")
+    title_rows = s_c.fetchall()
+    
     s_conn.close()
 
+    # Build mapping: absolute_page_id -> (part, sequential_page)
     abs_page_map = {}
-    for abs_page, part, seq_page in rows:
-        abs_page_map[abs_page] = (str(part), seq_page)
+    for page_id, part, seq_page, number in page_rows:
+        abs_page_map[page_id] = (str(part), seq_page)
+    
+    # Build title info: title_id -> (page_id, parent_id)
+    title_info = {}
+    for title_id, page_id, parent_id in title_rows:
+        title_info[title_id] = (page_id, parent_id)
 
-    print(f"[INFO] .db has {len(abs_page_map)} mapped pages")
+    print(f"[INFO] .db has {len(abs_page_map)} pages and {len(title_info)} titles")
 
     # ── Step 4: Fetch Shamela TOC ──
     book_id_input, _ = extract_shamela_book_id(shamela_id)
@@ -637,21 +707,22 @@ def import_toc_for_book(book_id, shamela_id):
     print(f"[INFO] Shamela TOC has {len(toc_entries)} entries")
 
     # ── Step 5: Filter to THIS part only ──
-    # Try matching local_part against .db part names
-    # .db parts might be '1', '2', ... or '001', '002', ...
+    # Each TOC entry has an abs_page which is a page_id in the .db
+    # We need to check if that page belongs to our local_part
     part_entries = []
-    unmatched = []
+    unmatched_pages = []
 
     for entry in toc_entries:
-        abs_page = entry['abs_page']
-        if abs_page not in abs_page_map:
-            unmatched.append(entry)
+        abs_page_id = entry['abs_page']
+        
+        if abs_page_id not in abs_page_map:
+            unmatched_pages.append(entry)
             continue
 
-        db_part, seq_page = abs_page_map[abs_page]
+        db_part, seq_page = abs_page_map[abs_page_id]
 
         # Check if this entry belongs to our local part
-        # Match: '1' == '1', '1' == '001', '01' == '1', etc.
+        # Normalize both to integers for comparison
         is_match = False
         if db_part == local_part:
             is_match = True
@@ -663,10 +734,9 @@ def import_toc_for_book(book_id, shamela_id):
             part_entries.append({
                 'level': entry['level'],
                 'text': entry['text'],
+                'abs_page_id': abs_page_id,
                 'seq_page': seq_page,
-                'abs_page': abs_page,
             })
-        # else: belongs to a different part, skip
 
     print(f"[INFO] Filtered to {len(part_entries)} entries for part '{local_part}'")
 
@@ -705,32 +775,45 @@ def import_toc_for_book(book_id, shamela_id):
     stats = {'inserted': 0, 'exact': 0, 'synthetic': 0, 'unmatched': 0}
 
     for entry in part_entries:
-        target = entry['seq_page']
-        if target is None:
+        # The seq_page from .db is the sequential page number within the part
+        # This should match the page numbers in the local HTM file
+        target_seq_page = entry['seq_page']
+        
+        if target_seq_page is None:
             stats['unmatched'] += 1
             continue
 
         matched = False
 
-        # Exact match with tolerance
-        for delta in range(-PAGE_TOLERANCE, PAGE_TOLERANCE + 1):
-            pg = target + delta
-            if pg in page_lookup:
-                c.execute(
-                    "INSERT INTO headings (book_id, slide_id, level, text, anchor_id, source) VALUES (?,?,?,?,?,'imported')",
-                    (book_id, page_lookup[pg]['id'], entry['level'], entry['text'], '')
-                )
-                stats['inserted'] += 1
-                stats['exact'] += 1
-                matched = True
-                break
+        # Try exact match first
+        if target_seq_page in page_lookup:
+            c.execute(
+                "INSERT INTO headings (book_id, slide_id, level, text, anchor_id, source) VALUES (?,?,?,?,?,'imported')",
+                (book_id, page_lookup[target_seq_page]['id'], entry['level'], entry['text'], '')
+            )
+            stats['inserted'] += 1
+            stats['exact'] += 1
+            matched = True
+        else:
+            # Try with tolerance
+            for delta in range(-PAGE_TOLERANCE, PAGE_TOLERANCE + 1):
+                pg = target_seq_page + delta
+                if pg in page_lookup:
+                    c.execute(
+                        "INSERT INTO headings (book_id, slide_id, level, text, anchor_id, source) VALUES (?,?,?,?,?,'imported')",
+                        (book_id, page_lookup[pg]['id'], entry['level'], entry['text'], '')
+                    )
+                    stats['inserted'] += 1
+                    stats['exact'] += 1
+                    matched = True
+                    break
 
         if not matched:
             # Nearest slide fallback
             best = None
             best_diff = float('inf')
             for s in slides_with_page:
-                diff = abs(s['page'] - target) if s['page'] else 999
+                diff = abs(s['page'] - target_seq_page) if s['page'] else 999
                 if diff < best_diff:
                     best_diff = diff
                     best = s
@@ -759,7 +842,7 @@ def import_toc_for_book(book_id, shamela_id):
         'matched': stats['inserted'],
         'exact': stats['exact'],
         'synthetic': stats['synthetic'],
-        'unmatched': stats['unmatched'] + len(unmatched),
+        'unmatched': stats['unmatched'] + len(unmatched_pages),
         'total': len(toc_entries),
         'part': local_part,
         'part_entries': len(part_entries),
@@ -852,7 +935,9 @@ def link_db(book_id):
     if not book_folder:
         return jsonify({'status': 'error', 'message': 'تعذر تحديد مجلد الكتاب'}), 400
 
-    target = book_folder / "metadata.db"
+    # Save with original filename or as metadata.db
+    filename = file.filename or "metadata.db"
+    target = book_folder / filename
     file.save(target)
 
     is_valid, error = validate_shamela_db(target)
@@ -860,7 +945,7 @@ def link_db(book_id):
         target.unlink()
         return jsonify({'status': 'error', 'message': error}), 400
 
-    return jsonify({'status': 'ok', 'path': str(target)})
+    return jsonify({'status': 'ok', 'path': str(target), 'filename': filename})
 
 
 @app.route('/api/books/<int:book_id>/structure')
