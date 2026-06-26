@@ -470,7 +470,7 @@ def is_single_volume_db(db_path):
 
 def detect_local_part_name(book_id):
     """Detect which part this local file represents.
-    Returns part name string (e.g., '1', '2', '001') or None."""
+    Returns part name string (e.g., '1', '2', '001', 'المقدمة', 'الكتاب') or None."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT filename, path FROM books WHERE id=?", (book_id,))
@@ -487,6 +487,21 @@ def detect_local_part_name(book_id):
         part_num = m.group(1)
         # Normalize to string without leading zeros for matching
         return part_num
+
+    # Try filename without extension for non-numeric parts (e.g., المقدمة.htm -> المقدمة)
+    m = re.match(r'^([^.]+)\.(?:htm|html)$', filename, re.I)
+    if m:
+        part_name = m.group(1)
+        # If it's a known part name (like المقدمة, الكتاب, etc.), use it as-is
+        # Otherwise try to extract numeric part from it
+        if part_name.isdigit():
+            return part_name
+        # Check if it contains a number
+        num_match = re.search(r'(\d+)', part_name)
+        if num_match:
+            return num_match.group(1)
+        # Return the filename without extension as the part identifier
+        return part_name
 
     # Try PartName span in first slide
     conn = sqlite3.connect(DB_PATH)
@@ -791,9 +806,27 @@ def import_toc_for_book(book_id, shamela_id):
             is_match = False
             if db_part == local_part:
                 is_match = True
-            elif db_part and db_part.isdigit() and local_part.isdigit():
+            elif db_part and db_part.isdigit() and local_part and local_part.isdigit():
                 if int(db_part) == int(local_part):
                     is_match = True
+            elif db_part and local_part:
+                # Case-insensitive string comparison for non-numeric parts
+                # Normalize by removing common prefixes/suffixes
+                db_part_norm = db_part.strip().lower()
+                local_part_norm = local_part.strip().lower()
+                
+                # Try exact match
+                if db_part_norm == local_part_norm:
+                    is_match = True
+                # Try matching without common Arabic prefixes
+                elif db_part_norm.replace('الجزء', '').replace('ج', '').strip() == local_part_norm.replace('الجزء', '').replace('ج', '').strip():
+                    is_match = True
+                # Try numeric extraction from both
+                else:
+                    db_num = re.search(r'(\d+)', db_part)
+                    local_num = re.search(r'(\d+)', local_part)
+                    if db_num and local_num and int(db_num.group(1)) == int(local_num.group(1)):
+                        is_match = True
 
             if is_match:
                 part_entries.append({

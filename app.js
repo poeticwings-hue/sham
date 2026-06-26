@@ -31,6 +31,8 @@ var tocSearchClear = document.getElementById('toc-search-clear');
 // ── Additional State ──
 var currentSlideNumber = null;  // Track current slide for session restoration
 var currentActiveHeadingId = null;  // Track active heading for highlighting
+var currentSearchQuery = null;  // Track current search query for highlighting in pages
+var lastSearchResults = [];  // Store last search results for persistence
 
 // Arabic diacritics (tashkeel) range — matches the same characters the
 // server strips for search normalization, so toggling is predictable.
@@ -62,6 +64,20 @@ function setupEventListeners() {
     document.getElementById('btn-ai-toggle').addEventListener('click', function() { toggleAI(true); });
     document.getElementById('close-ai').addEventListener('click', function() { toggleAI(false); });
     document.getElementById('btn-send-ai').addEventListener('click', sendAIQuestion);
+
+    // Search button
+    var searchButton = document.getElementById('btn-search-execute');
+    if (searchButton) {
+        searchButton.addEventListener('click', handleSearch);
+    }
+
+    // Allow Enter key to trigger search
+    searchInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            handleSearch();
+        }
+    });
 
     searchInput.addEventListener('input', debounce(handleSearch, 400));
 
@@ -103,26 +119,23 @@ function setupTashkeelToggle() {
 
         if (!currentSlidesData.length) return;
 
-        // Get the current scroll position and the element at the top of the viewport
+        // Save the exact scroll position before re-rendering
         var scrollTop = reader.scrollTop;
-        var viewportTop = scrollTop;
-        var viewportBottom = scrollTop + reader.clientHeight;
+        var scrollLeft = reader.scrollLeft;
         
-        // Find which slide is currently at the top of the viewport
+        // Get the first visible slide's offset
         var slides = bookContent.querySelectorAll('.slide-page');
-        var currentSlideIndex = 0;
+        var firstVisibleSlide = null;
+        var firstVisibleSlideOffset = null;
+        
         for (var i = 0; i < slides.length; i++) {
             var slideTop = slides[i].offsetTop;
             var slideBottom = slideTop + slides[i].offsetHeight;
             
-            // Check if this slide is at or just above the viewport top
-            if (slideBottom >= viewportTop && slideTop <= viewportTop) {
-                currentSlideIndex = i;
-                break;
-            }
-            // If we're past the viewport, use the previous slide
-            if (slideTop > viewportTop) {
-                currentSlideIndex = Math.max(0, i - 1);
+            // Check if this slide is visible in the viewport
+            if (slideBottom > scrollTop && slideTop < scrollTop + reader.clientHeight) {
+                firstVisibleSlide = slides[i];
+                firstVisibleSlideOffset = slideTop - scrollTop;
                 break;
             }
         }
@@ -130,14 +143,25 @@ function setupTashkeelToggle() {
         renderToken++;
         renderAllSlides(renderToken, null);
 
-        // After rendering, scroll to the same slide position
+        // After rendering, restore the scroll position
         requestAnimationFrame(function() {
             var newSlides = bookContent.querySelectorAll('.slide-page');
-            if (newSlides.length > currentSlideIndex) {
-                var targetSlide = newSlides[currentSlideIndex];
+            if (firstVisibleSlide && newSlides.length > 0) {
+                // Find the corresponding slide in the new DOM
+                var slideNumber = firstVisibleSlide.dataset.slideNumber;
+                var targetSlide = bookContent.querySelector('.slide-page[data-slide-number="' + slideNumber + '"]');
                 if (targetSlide) {
-                    targetSlide.scrollIntoView({ behavior: 'auto', block: 'start' });
+                    // Scroll to the same relative position within the slide
+                    var newTargetOffset = targetSlide.offsetTop + (firstVisibleSlideOffset || 0);
+                    reader.scrollTop = newTargetOffset;
                 }
+            }
+            
+            // Re-apply search highlights if there's an active search
+            if (currentSearchQuery) {
+                setTimeout(function() {
+                    highlightSearchTermsInPage(currentSearchQuery);
+                }, 100);
             }
         });
     });
@@ -320,7 +344,7 @@ function renderStructureContainer(bookId, container, headings) {
     if (!bookData || !bookData.has_db) {
         var linkDbRow = document.createElement('div');
         linkDbRow.className = 'tree-link-db';
-        linkDbRow.textContent = '🗃️ ربط قاعدة بيانات';
+        linkDbRow.textContent = '📚 ربط قاعدة بيانات';
         linkDbRow.title = 'رفع ملف .db يدوياً لربطه بهذا الكتاب';
         linkDbRow.addEventListener('click', function(e) {
             e.stopPropagation();
@@ -574,6 +598,9 @@ function handleSearch() {
     var query = searchInput.value.trim();
     if (query.length < 2) {
         searchResults.innerHTML = '';
+        currentSearchQuery = null;
+        lastSearchResults = [];
+        clearSearchHighlights();
         return;
     }
 
@@ -592,12 +619,78 @@ function handleSearch() {
         return res.json();
     })
     .then(function(results) {
+        currentSearchQuery = query;
+        lastSearchResults = results || [];
         renderSearchResults(results, query);
     })
     .catch(function(err) {
         console.error('Search error:', err);
         searchResults.innerHTML = '<div class="error-msg" style="padding:12px">خطأ في البحث: ' + escapeHtml(err.message) + '</div>';
+        currentSearchQuery = null;
+        lastSearchResults = [];
     });
+}
+
+// Clear search highlights from the current page
+function clearSearchHighlights() {
+    var highlights = bookContent.querySelectorAll('.search-highlight');
+    highlights.forEach(function(h) {
+        var parent = h.parentNode;
+        parent.replaceChild(document.createTextNode(h.textContent), h);
+        parent.normalize();
+    });
+}
+
+// Highlight search terms in the current page
+function highlightSearchTermsInPage(query) {
+    if (!query || !bookContent || !currentBookId) return;
+    
+    clearSearchHighlights();
+    
+    var slides = bookContent.querySelectorAll('.slide-page');
+    slides.forEach(function(slide) {
+        var text = slide.textContent;
+        if (text.includes(query)) {
+            var html = slide.innerHTML;
+            slide.innerHTML = highlightSearchTermsInHtml(html, query);
+        }
+    });
+}
+
+// Highlight search terms in HTML content
+function highlightSearchTermsInHtml(html, query) {
+    if (!query) return html;
+    
+    var queryLower = query.toLowerCase();
+    var result = html;
+    var lastIndex = 0;
+    var matchIndex;
+    var textLower = html.toLowerCase();
+    
+    while ((matchIndex = textLower.indexOf(queryLower, lastIndex)) !== -1) {
+        // Only highlight if not already highlighted
+        var before = result.substring(0, matchIndex);
+        var after = result.substring(matchIndex);
+        
+        // Check if this match is already inside a search-highlight span
+        var beforeLower = before.toLowerCase();
+        var spanStartInBefore = beforeLower.lastIndexOf('<span class="search-highlight"');
+        var spanEndInBefore = beforeLower.lastIndexOf('</span>');
+        
+        if (spanStartInBefore === -1 || spanEndInBefore > spanStartInBefore) {
+            // Not inside a highlight span, so highlight this match
+            var matchEnd = matchIndex + query.length;
+            result = before + '<span class="search-highlight">' + 
+                     html.substring(matchIndex, matchEnd) + '</span>' + 
+                     after.substring(query.length);
+            lastIndex = matchIndex + query.length + 34; // Skip past the added span tags
+            textLower = result.toLowerCase();
+        } else {
+            lastIndex = matchIndex + 1;
+        }
+    }
+    
+    return result;
 }
 
 function renderSearchResults(results, query) {
@@ -613,18 +706,39 @@ function renderSearchResults(results, query) {
     results.forEach(function(r) {
         var item = document.createElement('div');
         item.className = 'search-result-item';
-        item.innerHTML = '<div class="result-title">' + highlightSearchTerms(r.book_title, searchQuery) + '</div>' +
-            '<div class="result-meta">صفحة ' + r.slide_number + (r.heading ? ' — ' + highlightSearchTerms(r.heading, searchQuery) : '') + '</div>' +
-            '<div class="result-snippet">' + highlightSearchTerms(r.snippet, searchQuery) + '</div>';
+        
+        // Show book title with matching text
+        var titleHtml = '<div class="result-title">' + escapeHtml(r.book_title) + '</div>';
+        
+        // Show page info and heading
+        var metaHtml = '<div class="result-meta">صفحة ' + r.slide_number + 
+                      (r.heading ? ' — ' + escapeHtml(r.heading) : '') + '</div>';
+        
+        // Show snippet with matching text highlighted
+        var snippetHtml = '<div class="result-snippet">' + 
+                          highlightSearchTerms(r.snippet || '', searchQuery) + '</div>';
+        
+        item.innerHTML = titleHtml + metaHtml + snippetHtml;
+        
         item.addEventListener('click', function() {
-            toggleModal(searchModal, false);
+            // Don't close modal if we're already in the same book
+            // This allows users to click multiple results without reopening search
+            
             if (currentBookId === r.book_id) {
                 scrollToSlideWhenReady(r.slide_number);
+                // Highlight the search term in the page
+                setTimeout(function() {
+                    highlightSearchTermsInPage(searchQuery);
+                }, 500);
             } else {
                 document.querySelectorAll('.tree-node.active').forEach(function(n) { n.classList.remove('active'); });
                 var node = bookTree.querySelector('.tree-node[data-book-id="' + r.book_id + '"]');
                 if (node) node.classList.add('active');
                 loadBookContent(r.book_id, { type: 'slide', value: r.slide_number });
+                // Highlight the search term in the page after loading
+                setTimeout(function() {
+                    highlightSearchTermsInPage(searchQuery);
+                }, 1000);
             }
         });
         searchResults.appendChild(item);
