@@ -35,7 +35,10 @@
                 <label><input type="radio" name="search-scope" value="all" checked> كل المكتبة</label>
                 <label><input type="radio" name="search-scope" value="current"> الكتاب الحالي فقط</label>
             </div>
-            <input type="text" id="search-input" placeholder="اكتب كلمة للبحث..." autocomplete="off">
+            <div class="search-input-container">
+                <input type="text" id="search-input" placeholder="اكتب كلمة للبحث..." autocomplete="off">
+                <button id="btn-search-execute" title="بحث">بحث</button>
+            </div>
             <div id="search-results"></div>
         </div>
     </div>

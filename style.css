@@ -120,12 +120,13 @@ html, body {
     border-left: 2px solid var(--border);
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow: visible;
     resize: horizontal;
     transition: none;
+    position: relative;
 }
 
-/* Resize handle for sidebar */
+/* Resize handle for sidebar - visible grip on the left edge */
 #sidebar::after {
     content: '';
     position: absolute;
@@ -135,10 +136,17 @@ html, body {
     height: 100%;
     cursor: ew-resize;
     background: transparent;
+    z-index: 10;
 }
 
 #sidebar:hover::after {
-    background: rgba(139, 105, 20, 0.1);
+    background: rgba(139, 105, 20, 0.2);
+}
+
+/* Make sure the reader doesn't interfere with resize */
+#reader {
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .sidebar-header {
@@ -311,6 +319,21 @@ html, body {
 .tree-import-toc.loading {
     color: var(--text-secondary);
     cursor: wait;
+}
+
+.tree-link-db {
+    padding: 5px 10px 5px 0;
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: var(--accent);
+    border-bottom: 1px dashed var(--border);
+    margin-bottom: 4px;
+    border-radius: 4px;
+    transition: background 0.15s;
+}
+
+.tree-link-db:hover {
+    background: var(--bg-secondary);
 }
 
 .tree-node.active > .tree-toggle {
@@ -560,6 +583,44 @@ html, body {
 }
 
 .close-btn:hover { color: var(--accent); }
+
+.search-input-container {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+#search-input {
+    flex: 1;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--font-body);
+    font-size: 1rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+#search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+#btn-search-execute {
+    padding: 10px 20px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: 0.95rem;
+    transition: background 0.2s;
+}
+
+#btn-search-execute:hover {
+    background: var(--accent-dark);
+}
 
 .search-options {
     display: flex;
